@@ -202,6 +202,71 @@ async def search_metrics(query: str, ctx: Context) -> Dict[str, Any]:
 
 
 @mcp.tool()
+async def get_kubernetes_deployments(ctx: Context, namespace: Optional[str] = None) -> Dict[str, Any]:
+    """Get Kubernetes deployments with their current state
+
+    Args:
+        namespace: Optional namespace to filter deployments (e.g., 'default', 'production')
+    """
+    try:
+        import time
+        app_ctx: AppContext = ctx.request_context.lifespan_context
+
+        # Query for deployment replicas in the last 5 minutes
+        to_ts = int(time.time())
+        from_ts = to_ts - 300  # 5 minutes ago
+
+        # Build query with optional namespace filter
+        namespace_filter = f",kube_namespace:{namespace}" if namespace else ""
+        query = f"avg:kubernetes_state.deployment.replicas_desired{{*{namespace_filter}}} by {{kube_deployment,kube_namespace,kube_cluster_name}}"
+
+        async with app_ctx.api_client as api_client:
+            api_instance = MetricsApi(api_client)
+            response = await api_instance.query_metrics(
+                _from=from_ts,
+                to=to_ts,
+                query=query
+            )
+
+        data = response.to_dict()
+        filepath = await _store_data(data, "kubernetes_deployments")
+
+        # Extract deployment information
+        deployments = []
+        for series in data.get("series", []):
+            scope = series.get("scope", "")
+            tags = {}
+            for tag in scope.split(","):
+                if ":" in tag:
+                    k, v = tag.split(":", 1)
+                    tags[k] = v
+
+            deployments.append({
+                "deployment": tags.get("kube_deployment", "unknown"),
+                "namespace": tags.get("kube_namespace", "unknown"),
+                "cluster": tags.get("kube_cluster_name", "unknown"),
+                "expression": series.get("expression", "")
+            })
+
+        # Get unique deployments
+        unique_deployments = {d["deployment"] for d in deployments}
+        unique_namespaces = {d["namespace"] for d in deployments}
+
+        await ctx.info(f"Found {len(unique_deployments)} deployments across {len(unique_namespaces)} namespaces")
+
+        return {
+            "filepath": filepath,
+            "summary": f"Found {len(unique_deployments)} deployments across {len(unique_namespaces)} namespaces",
+            "deployments": deployments,
+            "unique_deployment_names": sorted(list(unique_deployments)),
+            "unique_namespaces": sorted(list(unique_namespaces))
+        }
+    except Exception as e:
+        await ctx.error(f"Failed to get Kubernetes deployments: {str(e)}")
+        return {"error": f"Failed to get Kubernetes deployments: {str(e)}"}
+
+
+@mcp.tool()
 async def get_metric_metadata(metric_name: str, ctx: Context) -> Dict[str, Any]:
     """Get metadata for a specific metric"""
     try:
