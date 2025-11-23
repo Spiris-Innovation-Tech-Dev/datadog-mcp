@@ -1281,6 +1281,34 @@ async def create_downtime(
         return {"error": f"Failed to create downtime: {str(e)}"}
 
 
+@mcp.tool()
+async def cancel_downtime(
+    downtime_id: int,
+    ctx: Context
+) -> Dict[str, Any]:
+    """Cancel a scheduled downtime
+
+    Args:
+        downtime_id: ID of the downtime to cancel
+    """
+    try:
+        app_ctx: AppContext = ctx.request_context.lifespan_context
+        api_instance = DowntimesApi(app_ctx.api_client)
+
+        await api_instance.cancel_downtime(downtime_id)
+
+        await ctx.info(f"Cancelled downtime ID: {downtime_id}")
+
+        return {
+            "summary": f"Cancelled downtime ID: {downtime_id}",
+            "downtime_id": downtime_id,
+            "status": "cancelled"
+        }
+    except Exception as e:
+        await ctx.error(f"Failed to cancel downtime: {str(e)}")
+        return {"error": f"Failed to cancel downtime: {str(e)}"}
+
+
 # Tags API
 @mcp.tool()
 async def get_tags(ctx: Context, source: Optional[str] = None) -> Dict[str, Any]:
