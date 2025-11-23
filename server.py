@@ -723,6 +723,252 @@ async def get_synthetics_tests(ctx: Context) -> Dict[str, Any]:
         return {"error": f"Failed to get Synthetics tests: {str(e)}"}
 
 
+@mcp.tool()
+async def get_synthetics_locations(ctx: Context) -> Dict[str, Any]:
+    """Get all available Synthetics locations (public and private)"""
+    try:
+        app_ctx: AppContext = ctx.request_context.lifespan_context
+
+        async with app_ctx.api_client as api_client:
+            api_instance = SyntheticsApi(api_client)
+            response = await api_instance.list_locations()
+
+        data = response.to_dict()
+        filepath = await _store_data(data, "synthetics_locations")
+
+        locations = data.get("locations", [])
+
+        # Categorize locations
+        public_locs = [loc for loc in locations if not loc.get("is_private", False)]
+        private_locs = [loc for loc in locations if loc.get("is_private", False)]
+
+        # Group public locations by region
+        regions = {}
+        for loc in public_locs:
+            region = loc.get("region", {}).get("name", "Unknown")
+            if region not in regions:
+                regions[region] = []
+            regions[region].append(loc.get("id"))
+
+        await ctx.info(f"Retrieved {len(locations)} Synthetics locations ({len(public_locs)} public, {len(private_locs)} private)")
+
+        return {
+            "filepath": filepath,
+            "summary": f"Retrieved {len(locations)} Synthetics locations ({len(public_locs)} public, {len(private_locs)} private)",
+            "total_locations": len(locations),
+            "public_count": len(public_locs),
+            "private_count": len(private_locs),
+            "regions": regions,
+            "eu_locations": [loc.get("id") for loc in public_locs if "eu" in loc.get("id", "").lower()]
+        }
+    except Exception as e:
+        await ctx.error(f"Failed to get Synthetics locations: {str(e)}")
+        return {"error": f"Failed to get Synthetics locations: {str(e)}"}
+
+
+@mcp.tool()
+async def create_synthetics_test(
+    name: str,
+    test_type: str,
+    url: str,
+    locations: List[str],
+    ctx: Context,
+    message: str = "",
+    tags: Optional[List[str]] = None,
+    tick_every: int = 300
+) -> Dict[str, Any]:
+    """Create a Synthetic API test (HTTP check)
+
+    Args:
+        name: Name of the test
+        test_type: Type of test - currently only 'api' is supported (for HTTP checks)
+        url: URL to monitor
+        locations: List of location IDs (e.g., ['aws:eu-central-1'])
+        message: Notification message (supports {{#is_alert}}...{{/is_alert}} conditionals)
+        tags: List of tags
+        tick_every: How often to run the test in seconds (default: 300 = 5 minutes)
+    """
+    try:
+        from datadog_api_client.v1.model.synthetics_api_test import SyntheticsAPITest
+        from datadog_api_client.v1.model.synthetics_api_test_config import SyntheticsAPITestConfig
+        from datadog_api_client.v1.model.synthetics_api_test_type import SyntheticsAPITestType
+        from datadog_api_client.v1.model.synthetics_test_details_sub_type import SyntheticsTestDetailsSubType
+        from datadog_api_client.v1.model.synthetics_test_options import SyntheticsTestOptions
+        from datadog_api_client.v1.model.synthetics_test_request import SyntheticsTestRequest
+        from datadog_api_client.v1.model.synthetics_assertion_target import SyntheticsAssertionTarget
+        from datadog_api_client.v1.model.synthetics_assertion_operator import SyntheticsAssertionOperator
+        from datadog_api_client.v1.model.synthetics_assertion_type import SyntheticsAssertionType
+
+        app_ctx: AppContext = ctx.request_context.lifespan_context
+
+        # Create basic HTTP test configuration
+        test_config = SyntheticsAPITest(
+            name=name,
+            type=SyntheticsAPITestType.API,
+            subtype=SyntheticsTestDetailsSubType.HTTP,
+            config=SyntheticsAPITestConfig(
+                request=SyntheticsTestRequest(
+                    method="GET",
+                    url=url,
+                    timeout=30.0
+                ),
+                assertions=[
+                    SyntheticsAssertionTarget(
+                        operator=SyntheticsAssertionOperator.IS,
+                        target=200,
+                        type=SyntheticsAssertionType.STATUS_CODE
+                    ),
+                    SyntheticsAssertionTarget(
+                        operator=SyntheticsAssertionOperator.LESS_THAN,
+                        target=3000,
+                        type=SyntheticsAssertionType.RESPONSE_TIME
+                    )
+                ]
+            ),
+            locations=locations,
+            message=message,
+            options=SyntheticsTestOptions(
+                tick_every=tick_every,
+                min_failure_duration=0,
+                min_location_failed=1
+            ),
+            tags=tags or []
+        )
+
+        api_instance = SyntheticsApi(app_ctx.api_client)
+        response = await api_instance.create_synthetics_api_test(body=test_config)
+
+        data = response.to_dict()
+        filepath = await _store_data(data, "synthetics_test_created")
+
+        await ctx.info(f"Created Synthetics test: {data.get('name')} (ID: {data.get('public_id')})")
+
+        return {
+            "filepath": filepath,
+            "summary": f"Created Synthetics test: {data.get('name')} (ID: {data.get('public_id')})",
+            "test_id": data.get("public_id"),
+            "test_name": data.get("name"),
+            "monitor_id": data.get("monitor_id"),
+            "status": "created"
+        }
+    except Exception as e:
+        await ctx.error(f"Failed to create Synthetics test: {str(e)}")
+        return {"error": f"Failed to create Synthetics test: {str(e)}"}
+
+
+@mcp.tool()
+async def trigger_synthetics_tests(
+    test_ids: List[str],
+    ctx: Context
+) -> Dict[str, Any]:
+    """Trigger Synthetics tests manually
+
+    Args:
+        test_ids: List of Synthetics test public IDs to trigger
+    """
+    try:
+        from datadog_api_client.v1.model.synthetics_trigger_body import SyntheticsTriggerBody
+        from datadog_api_client.v1.model.synthetics_trigger_test import SyntheticsTriggerTest
+
+        app_ctx: AppContext = ctx.request_context.lifespan_context
+
+        trigger_body = SyntheticsTriggerBody(
+            tests=[SyntheticsTriggerTest(public_id=test_id) for test_id in test_ids]
+        )
+
+        api_instance = SyntheticsApi(app_ctx.api_client)
+        response = await api_instance.trigger_tests(body=trigger_body)
+
+        data = response.to_dict()
+        filepath = await _store_data(data, "synthetics_trigger")
+
+        await ctx.info(f"Triggered {len(data.get('triggered_check_ids', []))} Synthetics tests")
+
+        return {
+            "filepath": filepath,
+            "summary": f"Triggered {len(data.get('triggered_check_ids', []))} Synthetics tests",
+            "batch_id": data.get("batch_id"),
+            "triggered_test_ids": data.get("triggered_check_ids", []),
+            "locations": [loc.get("display_name") for loc in data.get("locations", [])],
+            "status": "triggered"
+        }
+    except Exception as e:
+        await ctx.error(f"Failed to trigger Synthetics tests: {str(e)}")
+        return {"error": f"Failed to trigger Synthetics tests: {str(e)}"}
+
+
+@mcp.tool()
+async def update_synthetics_test(
+    test_id: str,
+    ctx: Context,
+    min_failure_duration: Optional[int] = None,
+    min_location_failed: Optional[int] = None,
+    tick_every: Optional[int] = None,
+    name: Optional[str] = None,
+    message: Optional[str] = None,
+    tags: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    """Update a Synthetics test configuration
+
+    Args:
+        test_id: Public ID of the Synthetics test to update
+        min_failure_duration: Number of seconds test must fail before alerting (e.g., 180 for 3 minutes)
+        min_location_failed: Minimum number of locations that must fail before alerting
+        tick_every: How often to run the test in seconds
+        name: New name for the test
+        message: New notification message
+        tags: New list of tags
+    """
+    try:
+        app_ctx: AppContext = ctx.request_context.lifespan_context
+        api_instance = SyntheticsApi(app_ctx.api_client)
+
+        # First, get the existing test
+        existing_test = await api_instance.get_api_test(test_id)
+
+        # Create a new test object with only allowed fields (no read-only fields)
+        from datadog_api_client.v1.model.synthetics_api_test import SyntheticsAPITest
+        updated_test = SyntheticsAPITest(
+            name=name if name is not None else existing_test.name,
+            type=existing_test.type,
+            subtype=existing_test.subtype,
+            config=existing_test.config,
+            locations=existing_test.locations,
+            message=message if message is not None else existing_test.message,
+            options=existing_test.options,
+            tags=tags if tags is not None else existing_test.tags,
+            status=existing_test.status
+        )
+
+        # Update options
+        if min_failure_duration is not None:
+            updated_test.options.min_failure_duration = min_failure_duration
+        if min_location_failed is not None:
+            updated_test.options.min_location_failed = min_location_failed
+        if tick_every is not None:
+            updated_test.options.tick_every = tick_every
+
+        # Update the test
+        response = await api_instance.update_api_test(test_id, body=updated_test)
+
+        data = response.to_dict()
+        filepath = await _store_data(data, "synthetics_test_updated")
+
+        await ctx.info(f"Updated Synthetics test: {data.get('name')} (ID: {test_id})")
+
+        return {
+            "filepath": filepath,
+            "summary": f"Updated Synthetics test: {data.get('name')} (ID: {test_id})",
+            "test_id": test_id,
+            "test_name": data.get("name"),
+            "options": data.get("options", {}),
+            "status": "updated"
+        }
+    except Exception as e:
+        await ctx.error(f"Failed to update Synthetics test: {str(e)}")
+        return {"error": f"Failed to update Synthetics test: {str(e)}"}
+
+
 # RUM Tools - Commented out due to API availability issues
 # @mcp.tool()
 # async def get_rum_applications(ctx: Context) -> Dict[str, Any]:
