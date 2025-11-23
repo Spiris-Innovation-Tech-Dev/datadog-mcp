@@ -178,18 +178,18 @@ async def search_metrics(query: str, ctx: Context) -> Dict[str, Any]:
     """Search for metrics by name pattern"""
     try:
         app_ctx: AppContext = ctx.request_context.lifespan_context
-        
+
         async with app_ctx.api_client as api_client:
             api_instance = MetricsApi(api_client)
             # Use list_metrics with query parameter
             response = await api_instance.list_metrics(q=query)
-            
+
         data = response.to_dict()
         filepath = await _store_data(data, "metrics_search")
-        
+
         metrics = data.get("metrics", [])
         await ctx.info(f"Found {len(metrics)} metrics matching '{query}'")
-        
+
         return {
             "filepath": filepath,
             "summary": f"Found {len(metrics)} metrics matching '{query}'",
